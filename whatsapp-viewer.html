@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WhatsApp Chat Viewer</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-100 h-screen overflow-hidden">
+    <div id="root" class="h-full"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+
+        function WhatsAppViewer() {
+            const [messages, setMessages] = useState([]);
+            const [chatList, setChatList] = useState([]);
+            const [selectedChat, setSelectedChat] = useState(null);
+            const [allWorkbooks, setAllWorkbooks] = useState([]);  // Store multiple workbooks
+
+            // ===== CONFIGURATION: Set your default file paths here =====
+            const DEFAULT_FILES = [
+                { path: './system_merged_chats_personal.xlsx', name: 'Personal Chats' },
+                { path: './system_merged_chats_group.xlsx', name: 'Group Chats' }
+            ];
+            const LOAD_DEFAULT_ON_START = true;  // Set to false to disable auto-load
+            // ===========================================================
+
+            // Auto-load default files on component mount
+            useEffect(() => {
+                if (LOAD_DEFAULT_ON_START) {
+                    loadDefaultFiles();
+                }
+            }, []);
+
+            const loadDefaultFiles = async () => {
+                for (const fileConfig of DEFAULT_FILES) {
+                    try {
+                        const response = await fetch(fileConfig.path);
+                        if (!response.ok) {
+                            console.log(`Default file not found: ${fileConfig.name}`);
+                            continue;
+                        }
+                        const blob = await response.blob();
+                        const arrayBuffer = await blob.arrayBuffer();
+                        const data = new Uint8Array(arrayBuffer);
+                        processWorkbook(data, fileConfig.name);
+                    } catch (error) {
+                        console.log(`Could not load ${fileConfig.name}:`, error.message);
+                    }
+                }
+            };
+
+            const handleFileUpload = (e) => {
+                const uploadedFiles = Array.from(e.target.files);
+                
+                uploadedFiles.forEach(file => {
+                    const reader = new FileReader();
+                    
+                    reader.onload = (event) => {
+                        const data = new Uint8Array(event.target.result);
+                        processWorkbook(data, file.name);
+                    };
+                    
+                    reader.readAsArrayBuffer(file);
+                });
+            };
+
+            const processWorkbook = (data, fileName) => {
+                const wb = XLSX.read(data, { type: 'array' });
+                
+                // Add to workbooks collection
+                const newWorkbook = {
+                    workbook: wb,
+                    fileName: fileName
+                };
+                
+                setAllWorkbooks(prev => {
+                    const updated = [...prev, newWorkbook];
+                    
+                    // Extract all chats from all workbooks
+                    const allChats = [];
+                    
+                    updated.forEach((wbData, wbIndex) => {
+                        wbData.workbook.SheetNames.forEach(sheetName => {
+                            const sheet = wbData.workbook.Sheets[sheetName];
+                            const jsonData = XLSX.utils.sheet_to_json(sheet);
+                            
+                            // Extract contact/group name from sheet name (everything before first "_")
+                            const contactName = sheetName.split('_')[0];
+                            
+                            // Get last message
+                            let lastMessage = '';
+                            let lastTimestamp = null;
+                            
+                            if (jsonData.length > 0) {
+                                const lastRow = jsonData[jsonData.length - 1];
+                                lastMessage = (lastRow['Message'] || '').replace(/^"|"$/g, '').substring(0, 50);
+                                lastTimestamp = lastRow['Timestamp'] || null;
+                            }
+                            
+                            // Determine if it's a group chat by checking if there are multiple senders
+                            const uniqueSenders = new Set(jsonData.map(row => row['Sender']).filter(Boolean));
+                            const isGroup = uniqueSenders.size > 2;  // More than just "You" and one other person
+                            
+                            allChats.push({
+                                name: contactName,
+                                sheetName: sheetName,
+                                lastMessage: lastMessage || 'No messages',
+                                lastTimestamp: lastTimestamp,
+                                messageCount: jsonData.length,
+                                workbookIndex: wbIndex,
+                                fileName: wbData.fileName,
+                                isGroup: isGroup
+                            });
+                        });
+                    });
+                    
+                    // Sort by last timestamp (most recent first)
+                    allChats.sort((a, b) => {
+                        if (!a.lastTimestamp) return 1;
+                        if (!b.lastTimestamp) return -1;
+                        return new Date(b.lastTimestamp) - new Date(a.lastTimestamp);
+                    });
+                    
+                    setChatList(allChats);
+                    return updated;
+                });
+            };
+
+            const loadFullChat = (chat) => {
+                if (!allWorkbooks || allWorkbooks.length === 0) return;
+                
+                setSelectedChat(chat);
+                const workbookData = allWorkbooks[chat.workbookIndex];
+                const sheet = workbookData.workbook.Sheets[chat.sheetName];
+                const jsonData = XLSX.utils.sheet_to_json(sheet);
+                
+                const processedMessages = jsonData.map((row, index) => ({
+                    id: index,
+                    chatName: row['Chat Name'] || row['chat name'] || row['Sender'] || '',
+                    sender:  row['Chat Name'] || row['chat name'] || row['Sender'] || '',
+                    message: row['Message'] || row['message'] || '',
+                    timestamp: row['Timestamp'] || row['timestamp'] || '',
+                    phone: row['Phone'] || row['phone'] || '',
+                    type: row['Type'] || row['type'] || 'Personal',
+                    isGroup: chat.isGroup
+                }));
+                
+                setMessages(processedMessages);
+                
+                // Auto-scroll to bottom after messages load
+                setTimeout(() => {
+                    const chatContainer = document.getElementById('chat-messages-container');
+                    if (chatContainer) {
+                        chatContainer.scrollTop = chatContainer.scrollHeight;
+                    }
+                }, 100);
+            };
+
+            const formatTime = (timestamp) => {
+                try {
+                    const date = new Date(timestamp);
+                    return date.toLocaleTimeString('en-US', { 
+                        hour: '2-digit', 
+                        minute: '2-digit',
+                        hour12: true 
+                    });
+                } catch {
+                    return timestamp;
+                }
+            };
+
+            const formatDate = (timestamp) => {
+                try {
+                    const date = new Date(timestamp);
+                    return date.toLocaleDateString('en-US', { 
+                        month: 'short', 
+                        day: 'numeric', 
+                        year: 'numeric' 
+                    });
+                } catch {
+                    return '';
+                }
+            };
+
+            const formatLastMessageTime = (timestamp) => {
+                try {
+                    const date = new Date(timestamp);
+                    const now = new Date();
+                    const diffTime = Math.abs(now - date);
+                    const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+                    
+                    if (diffDays === 0) {
+                        return date.toLocaleTimeString('en-US', { 
+                            hour: '2-digit', 
+                            minute: '2-digit',
+                            hour12: true 
+                        });
+                    } else if (diffDays === 1) {
+                        return 'Yesterday';
+                    } else if (diffDays < 7) {
+                        return date.toLocaleDateString('en-US', { weekday: 'short' });
+                    } else {
+                        return date.toLocaleDateString('en-US', { 
+                            month: 'numeric', 
+                            day: 'numeric',
+                            year: '2-digit'
+                        });
+                    }
+                } catch {
+                    return '';
+                }
+            };
+
+            const shouldShowDateSeparator = (currentMsg, prevMsg) => {
+                if (!prevMsg) return true;
+                const currentDate = new Date(currentMsg.timestamp).toDateString();
+                const prevDate = new Date(prevMsg.timestamp).toDateString();
+                return currentDate !== prevDate;
+            };
+
+            return (
+                <div className="h-full bg-gray-100 flex">
+                    {/* Sidebar - Chat List */}
+                    <div className="w-96 bg-white border-r border-gray-200 flex flex-col h-full">
+                        {/* Sidebar Header */}
+                        <div className="bg-teal-700 text-white p-4">
+                            <h1 className="text-xl font-semibold">WhatsApp Chats</h1>
+                            <p className="text-xs text-teal-100 mt-1">
+                                {chatList.length > 0 ? `${chatList.length} conversations` : 'Upload your backup'}
+                            </p>
+                        </div>
+
+                        {/* Upload Section */}
+                        <div className="p-4 border-b border-gray-200">
+                            <label className="flex flex-col items-center justify-center w-full h-24 border-2 border-dashed border-gray-300 rounded-lg cursor-pointer hover:bg-gray-50 transition">
+                                <div className="flex flex-col items-center justify-center">
+                                    <svg className="w-8 h-8 text-gray-400 mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                                    </svg>
+                                    <p className="text-xs text-gray-600">
+                                        {chatList.length > 0 ? `${chatList.length} chats loaded` : 'Upload XLSX files'}
+                                    </p>
+                                    <p className="text-xs text-gray-400 mt-1">Multiple files supported</p>
+                                </div>
+                                <input 
+                                    type="file" 
+                                    className="hidden" 
+                                    accept=".xlsx,.xls"
+                                    multiple
+                                    onChange={handleFileUpload}
+                                />
+                            </label>
+                        </div>
+
+                        {/* Chat List */}
+                        <div className="flex-1 overflow-y-auto">
+                            {chatList.length === 0 ? (
+                                <div className="flex items-center justify-center h-full text-gray-500 p-4 text-center">
+                                    <p className="text-sm">Upload an XLSX file with multiple sheets<br/>Each sheet = one chat conversation</p>
+                                </div>
+                            ) : (
+                                <div>
+                                    {chatList.map((chat, index) => (
+                                        <div
+                                            key={index}
+                                            onClick={() => loadFullChat(chat)}
+                                            className={`p-4 border-b border-gray-100 cursor-pointer hover:bg-gray-50 transition ${
+                                                selectedChat?.sheetName === chat.sheetName ? 'bg-gray-100' : ''
+                                            }`}
+                                        >
+                                            <div className="flex items-start justify-between">
+                                                <div className="flex-1 min-w-0">
+                                                    <div className="flex items-center justify-between mb-1">
+                                                        <div className="flex items-center gap-2">
+                                                            <h3 className="font-semibold text-gray-900 truncate">
+                                                                {chat.name}
+                                                            </h3>
+                                                            {chat.isGroup && (
+                                                                <span className="bg-teal-100 text-teal-700 text-xs px-2 py-0.5 rounded-full flex-shrink-0">
+                                                                    Group
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                        <span className="text-xs text-gray-500 ml-2 flex-shrink-0">
+                                                            {formatLastMessageTime(chat.lastTimestamp)}
+                                                        </span>
+                                                    </div>
+                                                    <p className="text-sm text-gray-600 truncate">
+                                                        {chat.lastMessage || 'No messages'}
+                                                    </p>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                    </div>
+
+                    {/* Main Chat Area */}
+                    <div className="flex-1 flex flex-col h-full">
+                        {/* Chat Header */}
+                        <div className="bg-teal-700 text-white p-4 shadow-lg">
+                            <div className="flex items-center gap-2">
+                                <h2 className="text-xl font-semibold">
+                                    {selectedChat ? selectedChat.name : 'Select a chat'}
+                                </h2>
+                                {selectedChat?.isGroup && (
+                                    <span className="bg-teal-600 text-white text-xs px-2 py-1 rounded">
+                                        Group Chat
+                                    </span>
+                                )}
+                            </div>
+                            {selectedChat && (
+                                <p className="text-sm text-teal-100 mt-1">
+                                    {messages.length} messages
+                                </p>
+                            )}
+                        </div>
+
+                        {/* Chat Messages */}
+                        <div id="chat-messages-container" className="flex-1 bg-[#e5ddd5] p-4 overflow-y-auto" 
+                             style={{backgroundImage: 'url("data:image/svg+xml,%3Csvg width=\'100\' height=\'100\' xmlns=\'http://www.w3.org/2000/svg\'%3E%3Cpath d=\'M0 0h100v100H0z\' fill=\'%23e5ddd5\'/%3E%3Cpath d=\'M50 0L0 50l50 50 50-50z\' fill=\'%23d9d3cc\' fill-opacity=\'.05\'/%3E%3C/svg%3E")'}}>
+                            
+                            {!selectedChat ? (
+                                <div className="flex items-center justify-center h-full text-gray-500">
+                                    <div className="text-center">
+                                        <svg className="w-32 h-32 mx-auto mb-4 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                                        </svg>
+                                        <p className="text-lg">Select a chat to view messages</p>
+                                    </div>
+                                </div>
+                            ) : messages.length === 0 ? (
+                                <div className="flex items-center justify-center h-full text-gray-500">
+                                    <p>No messages in this chat</p>
+                                </div>
+                            ) : (
+                                <div className="space-y-2">
+                                    {messages.map((msg, index) => {
+                                        const showDate = shouldShowDateSeparator(msg, messages[index - 1]);
+                                        const isYou = msg.chatName === 'You';
+                                        
+                                        return (
+                                            <div key={msg.id}>
+                                                {showDate && (
+                                                    <div className="flex justify-center my-4">
+                                                        <span className="bg-white bg-opacity-90 text-gray-700 text-xs px-3 py-1 rounded-lg shadow">
+                                                            {formatDate(msg.timestamp)}
+                                                        </span>
+                                                    </div>
+                                                )}
+                                                
+                                                <div className={`flex ${isYou ? 'justify-end' : 'justify-start'}`}>
+                                                    <div className={`max-w-[70%] ${isYou ? 'bg-[#dcf8c6]' : 'bg-white'} rounded-lg shadow p-3`}>
+                                                        {msg.isGroup && (
+                                                            <div className="font-semibold text-sm mb-1" 
+                                                                 style={{color: isYou ? '#059669' : (msg.type === 'Business' ? '#00897b' : '#1976d2')}}>
+                                                                {msg.sender}
+                                                            </div>
+                                                        )}
+                                                        {!msg.isGroup && !isYou && (
+                                                            <div className="font-semibold text-sm mb-1" 
+                                                                 style={{color: msg.type === 'Business' ? '#00897b' : '#1976d2'}}>
+                                                                {msg.sender}
+                                                            </div>
+                                                        )}
+                                                        <div className="text-gray-800 text-sm whitespace-pre-wrap break-words">
+                                                            {msg.message.replace(/^"|"$/g, '')}
+                                                        </div>
+                                                        <div className="text-right text-xs text-gray-500 mt-1">
+                                                            {formatTime(msg.timestamp)}
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        ReactDOM.render(<WhatsAppViewer />, document.getElementById('root'));
+    </script>
+</body>
+</html>
